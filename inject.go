@@ -1,7 +1,9 @@
 package xexec
 
 import (
+	"bufio"
 	"fmt"
+	"io/fs"
 	"os"
 	"regexp"
 	"strings"
@@ -86,4 +88,94 @@ func Inject(content string, envs map[string]any) string {
 	})
 
 	return content
+}
+
+// InjectArgs 替换命令行参数中的变量占位符。
+func InjectArgs(args []string, envs map[string]any) []string {
+	for i, arg := range args {
+		args[i] = Inject(arg, envs)
+	}
+	return args
+}
+
+// InjectFile injects environment variables into a single file at the specified path.
+// It reads the file, replaces placeholders, and writes back to the file.
+// Rollback support: write new files first, and overwrite files only if there are no exceptions.
+// If the file does not exist, it returns nil.
+func InjectFile(path string, envs map[string]any) (err error) {
+	var info fs.FileInfo
+	info, err = os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// If the file does not exist, return nil
+			return
+		}
+		return fmt.Errorf("failed to open file")
+	}
+
+	if info.Size() == 0 {
+		// If the file is empty, return nil
+		return
+	}
+
+	// Open the file for reading
+	inFile, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("failed to open file")
+	}
+	defer func() {
+		_ = inFile.Close()
+	}()
+
+	var tempPath = path + ".tmp"
+	defer func() {
+		_ = os.Remove(tempPath)
+	}()
+
+	// Create a temporary file for writing
+	tmpFile, err := os.OpenFile(tempPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, info.Mode())
+	if err != nil {
+		return fmt.Errorf("failed to open file")
+	}
+	defer func() {
+		_ = tmpFile.Close()
+	}()
+
+	// Read the file line by line
+	const bufferSize = 64 * 1024
+	buf := make([]byte, bufferSize)
+	scanner := bufio.NewScanner(inFile)
+	scanner.Buffer(buf, bufferSize)
+	writer := bufio.NewWriter(tmpFile)
+	hasChanges := false
+	for scanner.Scan() {
+		line := scanner.Text()
+		// Replace placeholders in the line
+		newLine := Inject(line, envs)
+		if newLine != line {
+			// Mark that changes were made
+			hasChanges = true
+		}
+		// Write the modified line to the temporary file
+		_, err = fmt.Fprintln(writer, newLine)
+		if err != nil {
+			return fmt.Errorf("failed to write to file")
+		}
+	}
+	if err = scanner.Err(); err != nil {
+		return fmt.Errorf("failed to write to file")
+	}
+
+	// Flush the writer to ensure all data is written
+	if err = writer.Flush(); err != nil {
+		return fmt.Errorf("failed to write to file")
+	}
+	if !hasChanges {
+		// No changes made, do not overwrite the original file
+		return
+	}
+	if err = os.Rename(tempPath, path); err != nil {
+		return fmt.Errorf("failed to write to file")
+	}
+	return
 }
