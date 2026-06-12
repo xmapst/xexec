@@ -153,13 +153,15 @@ func (s *script) randomFilename(prefix, ext string) string {
 //   - 捕获 SystemExit 异常，将退出码写入文件，保证退出码的准确性
 //   - -u 参数禁用 Python 输出缓冲，确保实时看到脚本输出
 func (s *script) execPythonScript() (code int, err error) {
-	wrapperContent := fmt.Sprintf(`# -*- coding: utf-8 -*-
+	// 目标脚本路径通过 XEXEC_TARGET 环境变量传入，而非插值进脚本文本，
+	// 避免路径含引号、反斜杠等特殊字符时破坏 Python raw string 语法。
+	wrapperContent := `# -*- coding: utf-8 -*-
 import sys
 import os
 import runpy
 
 exit_code = 0
-script_path = r'%s'
+script_path = os.environ['XEXEC_TARGET']
 
 # 设置 sys.argv，第一个参数是脚本路径，后续是传入的参数
 sys.argv = [script_path] + sys.argv[1:]
@@ -167,7 +169,14 @@ sys.argv = [script_path] + sys.argv[1:]
 try:
     runpy.run_path(script_path, run_name='__main__')
 except SystemExit as e:
-    exit_code = e.code if e.code is not None else 0
+    if e.code is None:
+        exit_code = 0
+    elif isinstance(e.code, int):
+        exit_code = e.code
+    else:
+        # sys.exit("message") 形式：打印消息到 stderr，退出码规范化为 1
+        print(e.code, file=sys.stderr)
+        exit_code = 1
 except Exception:
     import traceback
     traceback.print_exc()
@@ -181,7 +190,7 @@ finally:
         except:
             pass
     sys.exit(exit_code if isinstance(exit_code, int) else 1)
-`, s.path)
+`
 	wrapperPath := filepath.Join(os.TempDir(), s.randomFilename("wrapper", ".py"))
 	defer func() {
 		_ = os.Remove(wrapperPath)
@@ -189,8 +198,17 @@ finally:
 	if err = os.WriteFile(wrapperPath, []byte(wrapperContent), os.ModePerm); err != nil {
 		return 255, err
 	}
+	// 解释器探测：优先 python3（大量现代 Linux/macOS 不再提供 python），
+	// 回退 python，最后回退 Windows 的 py launcher。
+	python := "python3"
+	for _, candidate := range []string{"python3", "python", "py"} {
+		if _, lookErr := exec.LookPath(candidate); lookErr == nil {
+			python = candidate
+			break
+		}
+	}
 	args := append([]string{"-u", wrapperPath}, s.args...)
-	return s.exec("python", args...)
+	return s.exec(python, args...)
 }
 
 // exec 执行指定命令，并发读取 stdout/stderr 并实时输出日志。
@@ -229,7 +247,11 @@ func (s *script) exec(command string, args ...string) (code int, err error) {
 	err = s.cmd.Run()
 	wg.Wait() // 等待输出读取完毕，防止日志截断
 
-	// 僵尸进程被操作系统提前回收时会产生此错误，属于正常情况，忽略
+	// 僵尸进程被操作系统提前回收时会产生此错误，属于正常情况，忽略。
+	// 触发场景：宿主进程把 SIGCHLD 设为 SIG_IGN 或自带 wait(-1) 的 reaper，
+	// 抢在本库 wait4 之前回收了子进程，使 ProcessState 无法得到退出码。
+	// 此时真实退出码已由 wrapper 写入退出码文件，由 parseExitCodeFromFile 兜底，
+	// 故这里清空错误、不让 ECHILD 污染返回值。
 	if err != nil && strings.Contains(err.Error(), "waitid: no child processes") {
 		err = nil
 	}
@@ -290,9 +312,15 @@ func (s *script) mergeEnv() []string {
 		result = append(result, env)
 	}
 
-	// 注入内置变量：脚本通过这两个变量找到文件路径并写入数据
+	// 注入内置变量：
+	//   - XEXEC_TARGET：目标脚本绝对路径，由包装脚本从环境变量读取，
+	//     避免将路径字符串插值进脚本文本时的转义/注入问题（路径含引号、空格、
+	//     反斜杠、中文等特殊字符均安全）
+	//   - XEXEC_EXIT_CODE_FILE / XEXEC_SAVE_ENV_FILE：脚本通过这两个变量
+	//     找到文件路径并写入退出码与导出的环境变量
 	result = append(
 		result,
+		fmt.Sprintf("XEXEC_TARGET=%s", s.path),
 		fmt.Sprintf("XEXEC_EXIT_CODE_FILE=%s", s.exitCodePath),
 		fmt.Sprintf("XEXEC_SAVE_ENV_FILE=%s", s.saveEnvPath),
 	)

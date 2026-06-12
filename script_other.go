@@ -17,17 +17,30 @@ import (
 //  1. 通过 trap 捕获 EXIT/INT/TERM 信号，确保无论何种原因退出都会写入退出码文件
 //  2. 以 "$@" 方式传递参数，正确处理含空格的参数
 //  3. 条件写入（[ ! -f ]）防止重复写入覆盖已有的退出码
+//
+// 为什么用 wrapper + trap 而不是让 sh 直接 exec 目标脚本：
+// exec 会用目标进程映像替换 sh，之后不再有任何代码能运行，退出码就只能
+// 依赖 Go 侧 cmd.Wait()/ProcessState 获取。但 xexec 是库，无法控制宿主进程
+// 的 SIGCHLD 处置——若宿主把 SIGCHLD 设为 SIG_IGN 或自带 wait(-1) 的
+// reaper，子进程可能在 Go 调用 wait4 之前就被抢先回收，导致 ECHILD
+// （exec() 中特判的 "waitid: no child processes"），退出码永久丢失退化为 255。
+// trap 让 sh 留在原地、在目标结束后把真实退出码写入文件，该文件由脚本自己
+// 写入、不依赖谁来 wait()，因此对外部 reaper 抢收免疫。这是刻意的健壮性取舍，
+// 不要为了少一层进程而改成 exec。
 func (s *script) execSysScript() (code int, err error) {
 	_ = os.Chmod(s.path, os.ModePerm)
-	wrapperContent := fmt.Sprintf(`#!/bin/sh
+	// 目标脚本路径通过 XEXEC_TARGET 环境变量传入，而非插值进脚本文本，
+	// 避免路径含特殊字符时破坏 shell 引号或构成命令注入。
+	// 不使用 local（非 POSIX）；printf 替代 echo 以规避实现差异。
+	wrapperContent := `#!/bin/sh
 _save_exit_code() {
-	local code=$?
-	[ ! -f "${XEXEC_EXIT_CODE_FILE}" ] && echo $code > "${XEXEC_EXIT_CODE_FILE}"
+	code=$?
+	[ ! -f "${XEXEC_EXIT_CODE_FILE}" ] && printf '%s\n' "$code" > "${XEXEC_EXIT_CODE_FILE}"
 	exit $code
 }
 trap _save_exit_code EXIT INT TERM
-"%s" "$@"
-`, s.path)
+"${XEXEC_TARGET}" "$@"
+`
 
 	wrapperPath := filepath.Join(os.TempDir(), s.randomFilename("wrapper", ".sh"))
 	defer func() {
@@ -51,10 +64,12 @@ trap _save_exit_code EXIT INT TERM
 //
 // cmd.Cancel 钩子在上下文取消时调用，实现级联终止整个进程树。
 func (s *script) beforeExec() {
-	s.cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-		Pgid:    os.Getpid(),
-	}
+	// SysProcAttr 按平台构建（见 sysProcAttr）：
+	//   - 所有 Unix 平台都设 Setpgid，使子进程成为新进程组组长，
+	//     cancel 中的 Kill(-pid, SIGKILL) 即可终止整个进程组。
+	//   - Linux/FreeBSD 额外设 Pdeathsig=SIGKILL，使 Go 进程异常退出
+	//     （崩溃 / kill -9，defer cancel 来不及执行）时内核自动清理子进程。
+	s.cmd.SysProcAttr = sysProcAttr()
 
 	s.cmd.Cancel = func() error {
 		defer func() {

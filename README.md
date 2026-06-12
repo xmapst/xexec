@@ -25,9 +25,10 @@
 
 其中：
 
-- Python 使用包装器脚本配合 `runpy.run_path()` 执行，保证 `if __name__ == '__main__'` 语义正确
+- Python 使用包装器脚本配合 `runpy.run_path()` 执行，保证 `if __name__ == '__main__'` 语义正确；解释器按 `python3` → `python` → `py` 顺序自动探测，适配只提供 `python3` 的现代系统
 - Windows 下自动区分 `powershell.exe` 与 `cmd.exe`
 - 非 Windows 平台统一走 `sh` 包装执行
+- 目标脚本路径通过内部环境变量 `XEXEC_TARGET` 传入包装脚本，而非拼接进脚本文本，避免路径含引号、空格、反斜杠、中文等字符时破坏语法或构成命令注入
 
 实现位置可参考：
 
@@ -42,10 +43,13 @@
 
 为此，`xexec` 会在执行前注入环境变量：
 
+- `XEXEC_TARGET`（目标脚本绝对路径）
 - `XEXEC_EXIT_CODE_FILE`
 - `XEXEC_SAVE_ENV_FILE`
 
 包装脚本在退出时会主动把真实退出码写入文件，然后由 Go 侧通过 [`script.parseExitCodeFromFile()`](script.go:250) 读取，这使得退出码结果通常比单纯读取进程状态更可靠。
+
+退出码写入文件（而非仅依赖 `cmd.Wait()`）还有一层重要意义：当宿主进程把 `SIGCHLD` 设为 `SIG_IGN` 或自带 `wait(-1)` 的 reaper 时，子进程可能在本库调用 `wait4` 之前被抢先回收，使 `ProcessState` 拿不到退出码（`ECHILD`）。此时退出码文件由脚本自己写入、不依赖谁来 `wait()`，因此对外部 reaper 抢收免疫。这也是包装脚本采用 `trap` 而非 `exec` 替换的根本原因。
 
 相关流程可参考：
 
@@ -78,13 +82,21 @@
 `xexec` 基于 [`context.Context`](https://pkg.go.dev/context) 工作，支持超时与主动取消。执行期间如果上下文取消：
 
 - Windows 下通过 `TASKKILL /T /F` 尝试清理整棵进程树
-- Unix/Linux 下通过进程组 + `SIGKILL` 清理子进程组
+- Unix/Linux 下通过进程组 + `SIGKILL` 清理子进程组（子进程以 `Setpgid` 成为新进程组组长，`Kill(-pid)` 即可终止整组）
 - 统一将退出码文件写入 `137`，表示被强制终止
+
+此外，在 Linux / FreeBSD 上还会设置 `Pdeathsig=SIGKILL`：当 Go 进程**异常退出**（崩溃、被 `kill -9`、panic，`defer cancel()` 来不及执行）时，由内核自动清理。需要注意它的边界：
+
+- `Pdeathsig` 是「单进程级」信号，只能清理 Go 的**直接子进程**（包装 sh）；包装脚本或目标脚本内部 fork 出的孙进程（如脚本里的 `cmd &`）够不到，崩溃时仍可能残留
+- 正常 cancel / 超时路径不受此限——`cmd.Cancel` 通过 `Kill(-pid)` 杀整个进程组，能清理整棵树
+- macOS / OpenBSD / NetBSD 等无 `Pdeathsig` 字段的平台仅设 `Setpgid`，崩溃清理能力退化
+- 若需要在崩溃场景下也可靠清理整棵进程树，应在部署层兜底（如 k8s pod / systemd cgroup），或自行引入 reaper 守护进程
 
 对应实现：
 
 - [`script.beforeExec()`](script_windows.go:100)
 - [`script.beforeExec()`](script_other.go:53)
+- [`sysProcAttr()`](script_pdeathsig.go:1)
 
 ### 5. 脚本回传环境变量
 
@@ -158,6 +170,8 @@ EOF
 ├── script_logger.go       # 日志接口与默认实现
 ├── script_windows.go      # Windows 平台实现
 ├── script_other.go        # 非 Windows 平台实现
+├── script_pdeathsig.go    # Linux/FreeBSD：Setpgid + Pdeathsig
+├── script_nopdeathsig.go  # 其余 Unix（macOS 等）：仅 Setpgid
 ├── test/
 │   ├── test.bat
 │   ├── test.ps1
@@ -350,10 +364,11 @@ xexec.WithScriptSecrets("password123", "secret-token")
 
 ## 环境变量回传约定
 
-`xexec` 会在执行时自动注入两个内部环境变量：
+`xexec` 会在执行时自动注入以下内部环境变量：
 
-- `XEXEC_EXIT_CODE_FILE`
-- `XEXEC_SAVE_ENV_FILE`
+- `XEXEC_TARGET`：目标脚本绝对路径（供包装脚本调用，避免路径插值）
+- `XEXEC_EXIT_CODE_FILE`：退出码文件路径
+- `XEXEC_SAVE_ENV_FILE`：环境变量回传文件路径
 
 通常你不需要手动设置它们，但如果你希望让脚本向 Go 返回结构化结果，可以在脚本中写入 `XEXEC_SAVE_ENV_FILE`。
 
@@ -528,10 +543,10 @@ _ = code
 ## 注意事项
 
 1. `xexec` 依赖目标机器存在相应解释器或执行环境，例如：
-   - Python 脚本需要 `python`
+   - Python 脚本需要 `python3`、`python` 或 `py`（按此顺序探测）
    - PowerShell 脚本需要 `powershell.exe`
    - Shell 脚本需要 `sh`
-2. 若脚本自身再派生复杂子进程，虽然库已尽量清理进程树，但不同平台的行为仍可能存在差异。
+2. 若脚本自身再派生复杂子进程：正常取消 / 超时时会通过进程组清理整棵树；但在 Go 进程异常崩溃时，`Pdeathsig` 只能清理直接子进程，孙进程可能残留（详见「超时取消与进程树清理」一节）。
 3. 若脚本输出极大且持续时间极长，应结合业务日志策略与资源限制使用。
 4. `WithScriptEnv()` 会覆盖同名系统环境变量，这是设计行为，需要调用方自行控制。
 5. `parseSaveEnvFile` 禁止覆盖当前系统环境变量，因此该“环境回传机制”更适合返回新变量，而不是修改已有变量。

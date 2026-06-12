@@ -49,10 +49,14 @@ func (s *script) execSysScript() (code int, err error) {
 		command = "powershell.exe"
 		args = []string{"-NoLogo", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"}
 		wrapperPath = filepath.Join(os.TempDir(), s.randomFilename("wrapper", ".ps1"))
-		wrapperContent = fmt.Sprintf(`$ErrorActionPreference='Continue'
+		// 目标脚本路径通过 $env:XEXEC_TARGET 读取，而非插值进脚本文本，
+		// 避免路径含特殊字符时破坏引号；同时使 wrapper 文本不含中文路径，
+		// 规避 GBK 代码页下以 UTF-8 写入 wrapper 文件导致的乱码。
+		// $null 置于比较左侧是 PowerShell 推荐写法。
+		wrapperContent = `$ErrorActionPreference='Continue'
 try {
-    & "%s" @args
-    if ($LASTEXITCODE -eq $null) {
+    & "$env:XEXEC_TARGET" @args
+    if ($null -eq $LASTEXITCODE) {
         $exitCode = 0
     } else {
         $exitCode = $LASTEXITCODE
@@ -65,18 +69,20 @@ try {
         $exitCode | Out-File -FilePath "$env:XEXEC_EXIT_CODE_FILE" -Encoding ASCII
     }
     exit $exitCode
-}`, s.path)
+}`
 	default:
 		command = "cmd.exe"
 		args = []string{"/C"}
 		wrapperPath = filepath.Join(os.TempDir(), s.randomFilename("wrapper", ".bat"))
-		wrapperContent = fmt.Sprintf(`@echo off
-call "%s" %%*
-set exitcode=%%ERRORLEVEL%%
-if not exist "%%XEXEC_EXIT_CODE_FILE%%" (
-    echo %%exitcode%% > "%%XEXEC_EXIT_CODE_FILE%%"
+		// 目标脚本路径通过 %XEXEC_TARGET% 读取，避免插值与中文路径乱码问题。
+		// 使用 <nul set /p 写入退出码，避免 echo 在数字后引入尾随空格。
+		wrapperContent = `@echo off
+call "%XEXEC_TARGET%" %*
+set exitcode=%ERRORLEVEL%
+if not exist "%XEXEC_EXIT_CODE_FILE%" (
+    <nul set /p=%exitcode%> "%XEXEC_EXIT_CODE_FILE%"
 )
-exit /b %%exitcode%%`, s.path)
+exit /b %exitcode%`
 	}
 	defer func() {
 		_ = os.Remove(wrapperPath)
