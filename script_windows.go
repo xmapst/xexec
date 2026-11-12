@@ -101,8 +101,15 @@ exit /b %exitcode%`
 // 便于通过 TASKKILL /T 递归终止整个进程树（包括子进程的子进程）。
 // HideWindow=true 防止在服务器环境中弹出控制台窗口影响用户体验。
 //
-// cmd.Cancel 使用 TASKKILL.exe 的 /T（树）和 /F（强制）参数
-// 确保整个进程树都被终止，而不仅仅是直接子进程。
+// cmd.Cancel 先用 TASKKILL.exe 的 /T（树）和 /F（强制）参数终止整个进程树
+// （含根进程），仅当 taskkill 失败时才退回到 Process.Kill() 只终止根进程。
+//
+// 这个顺序不可颠倒：taskkill /T 以根 PID 为起点沿父子关系向下遍历，要求根进程
+// 仍然存活。若先 Process.Kill() 杀掉根 cmd.exe，taskkill 会直接报
+// `ERROR: The process "<pid>" not found.`（退出码 128），遍历根本不会开始，
+// 孙进程（例如 ping.exe）就成了孤儿。
+// （Unix 侧可以先 Kill 再 Kill(-pid)，是因为进程组 ID 只要组内还有成员就一直有效，
+// 不依赖组长存活。）
 func (s *script) beforeExec() {
 	s.cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP, // 创建独立进程组
@@ -118,19 +125,24 @@ func (s *script) beforeExec() {
 		if s.cmd.Process == nil {
 			return fmt.Errorf("process not started")
 		}
-		var errs error
-		if err := s.cmd.Process.Kill(); err != nil {
-			errs = errors.Join(errs, err)
+		pid := s.cmd.Process.Pid
+
+		// 先 taskkill：此时根进程仍然存活，/T 才能从它出发遍历并终止整棵树，
+		// /F 强制终止（不等待进程响应）。成功即意味着整棵树（含根）都已终止。
+		kill := exec.Command("TASKKILL.exe", "/T", "/F", "/PID", strconv.Itoa(pid))
+		killErr := kill.Run()
+		if killErr == nil {
+			return nil
 		}
-		// TASKKILL /T 递归终止进程树，/F 强制终止（不等待进程响应）
-		kill := exec.Command("TASKKILL.exe", "/T", "/F", "/PID", strconv.Itoa(s.cmd.Process.Pid))
-		if err := kill.Run(); err != nil {
-			errs = errors.Join(errs, err)
+
+		// taskkill 失败（不可用、权限不足，或根进程恰好已自行退出）：
+		// 退而求其次直接终止根进程。此时子进程可能残留，故无论 Kill 是否成功，
+		// 都把 taskkill 的错误一并返回。
+		errs := fmt.Errorf("taskkill: %w", killErr)
+		if err := s.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			errs = errors.Join(errs, fmt.Errorf("kill process: %w", err))
 		}
-		if errs != nil {
-			return fmt.Errorf("error cancelling pid=%d, errors=%v", s.cmd.Process.Pid, errs)
-		}
-		return nil
+		return fmt.Errorf("error cancelling pid=%d: %w", pid, errs)
 	}
 }
 
