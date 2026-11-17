@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
-	"syscall"
 )
 
 // execSysScript 在 Unix/Linux 平台上通过 sh 包装脚本执行目标脚本。
@@ -93,7 +92,7 @@ func (s *script) beforeExec() {
 		}
 
 		// 再向整个进程组发送 SIGKILL，确保子进程也被终止（-pid 表示进程组 ID）
-		if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
+		if err := KillAll(pid); err != nil {
 			errs = errors.Join(errs, fmt.Errorf("kill process group: %w", err))
 		}
 

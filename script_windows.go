@@ -7,10 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime/debug"
-	"strconv"
 	"strings"
 	"syscall"
 
@@ -126,19 +124,15 @@ func (s *script) beforeExec() {
 			return fmt.Errorf("process not started")
 		}
 		pid := s.cmd.Process.Pid
-
-		// 先 taskkill：此时根进程仍然存活，/T 才能从它出发遍历并终止整棵树，
-		// /F 强制终止（不等待进程响应）。成功即意味着整棵树（含根）都已终止。
-		kill := exec.Command("TASKKILL.exe", "/T", "/F", "/PID", strconv.Itoa(pid))
-		killErr := kill.Run()
+		killErr := KillAll(pid)
 		if killErr == nil {
 			return nil
 		}
 
 		// taskkill 失败（不可用、权限不足，或根进程恰好已自行退出）：
 		// 退而求其次直接终止根进程。此时子进程可能残留，故无论 Kill 是否成功，
-		// 都把 taskkill 的错误一并返回。
-		errs := fmt.Errorf("taskkill: %w", killErr)
+		// 都把 killall 的错误一并返回。
+		errs := fmt.Errorf("killall: %w", killErr)
 		if err := s.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 			errs = errors.Join(errs, fmt.Errorf("kill process: %w", err))
 		}
