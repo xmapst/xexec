@@ -3,41 +3,41 @@ import sys
 import subprocess
 import platform
 
-# 输出 Hello World
+# Print Hello World
 print("Hello World")
 
-# 获取并打印命令行参数
-print(f"\n脚本路径: {sys.argv[0]}")
-print(f"参数数量: {len(sys.argv) - 1}")
+# Read and print command-line arguments
+print(f"\nScript path: {sys.argv[0]}")
+print(f"Argument count: {len(sys.argv) - 1}")
 if len(sys.argv) > 1:
-    print("参数列表:")
+    print("Arguments:")
     for i, arg in enumerate(sys.argv[1:], 1):
-        print(f"  参数 {i}: {arg}")
+        print(f"  Argument {i}: {arg}")
 else:
-    print("没有传递任何参数")
+    print("No arguments supplied")
 print()
-# 从标准输入读取每一行（支持管道和非交互模式）
+# Read each line from stdin (supports pipes and noninteractive mode)
 try:
     while True:
         line = sys.stdin.readline()
-        # 如果读到EOF或空行则退出
+        # Stop on EOF or an empty line
         if not line or line.strip() == '':
             break
-        # 去掉末尾的换行符并输出
+        # Strip the trailing newline and print the line
         print(f"Line: {line.rstrip()}")
 except (EOFError, KeyboardInterrupt):
-    # 如果没有输入流或用户中断，静默处理
+    # Ignore missing input or user interruption
     pass
 
-# 持续 ping
+# Ping continuously
 try:
-    # 根据操作系统选择合适的 ping 参数
+    # Choose ping arguments for the operating system
     if platform.system().lower() == 'windows':
-        # Windows: -t 表示持续 ping
+        # Windows: -t means continuous ping
         subprocess.run(['ping', '-t', '1.1.1.1'])
     else:
-        # Linux/Mac: 不需要 -t 参数，默认就是持续 ping
+        # Linux/macOS: continuous ping is the default; no -t needed
         subprocess.run(['ping', '1.1.1.1'])
 except KeyboardInterrupt:
-    print("\nPing 已停止")
+    print("\nPing stopped")
 

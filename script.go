@@ -18,34 +18,34 @@ import (
 )
 
 var (
-	// digitRe 匹配连续数字序列，用于从退出码文件中提取数字。
+	// digitRe matches consecutive digits to extract a number from the exit-code file.
 	digitRe = regexp.MustCompile(`\d+`)
 )
 
-// script 脚本执行器的核心结构体，封装单次脚本执行的所有上下文。
+// script holds all the context for a single script execution.
 //
-// 通过函数选项模式（ScriptOption）配置执行参数，
-// 支持 Python、Shell、PowerShell、Batch 等多种脚本类型。
+// Execution parameters are configured through functional options (ScriptOption).
+// Supported script types include Python, Shell, PowerShell, and Batch.
 type script struct {
-	cmd          *exec.Cmd          // 底层系统命令对象
-	ctx          context.Context    // 执行上下文，用于超时控制和取消
-	cancel       context.CancelFunc // 取消函数，脚本完成或超时后调用
-	env          []string           // 自定义环境变量列表（格式 KEY=VALUE）
-	args         []string           // 传递给脚本的命令行参数
-	dir          string             // 脚本工作目录
-	path         string             // 脚本文件绝对路径
-	stdin        io.Reader          // 标准输入，nil 表示不提供输入
-	exitCodePath string             // 退出码文件路径（通过 XEXEC_EXIT_CODE_FILE 环境变量传递给包装脚本）
-	saveEnvPath  string             // 环境变量导出文件路径（脚本可写入供 Go 读取）
-	logger       ILogger            // 日志记录器
-	secrets      []string           // 需要脱敏的敏感字符串列表
-	masker       *strings.Replacer  // 基于 secrets 构建的字符串替换器，执行日志脱敏
+	cmd          *exec.Cmd          // Underlying system command
+	ctx          context.Context    // Execution context for timeouts and cancellation
+	cancel       context.CancelFunc // Cancel function called after completion or timeout
+	env          []string           // Custom environment variables in KEY=VALUE format
+	args         []string           // Command-line arguments passed to the script
+	dir          string             // Script working directory
+	path         string             // Absolute script path
+	stdin        io.Reader          // Standard input; nil means no input
+	exitCodePath string             // Exit-code file path, passed to the wrapper through XEXEC_EXIT_CODE_FILE
+	saveEnvPath  string             // Exported environment file path, written by the script and read by Go
+	logger       ILogger            // Logger
+	secrets      []string           // Sensitive strings to redact
+	masker       *strings.Replacer  // String replacer built from secrets for log redaction
 }
 
-// ExecScriptContent 将脚本内容写入临时文件后执行，执行完毕自动清理。
+// ExecScriptContent writes script content to a temporary file, executes it, and removes it afterward.
 //
-// 适合动态生成脚本内容的场景，避免调用方手动管理临时文件。
-// 临时文件名包含纳秒时间戳，保证并发执行时文件名不冲突。
+// Useful for dynamically generated scripts without requiring callers to manage temporary files.
+// Temporary filenames include a nanosecond timestamp to avoid collisions during concurrent execution.
 func ExecScriptContent(ctx context.Context, kind, content string, options ...ScriptOption) (code int, env map[string]any, err error) {
 	scriptPath := filepath.Join(os.TempDir(), fmt.Sprintf(".script_%d.%s", time.Now().UnixNano(), kind))
 	defer func() {
@@ -58,17 +58,17 @@ func ExecScriptContent(ctx context.Context, kind, content string, options ...Scr
 	return ExecScript(ctx, scriptPath, options...)
 }
 
-// ExecScript 执行指定路径的脚本文件，返回退出码、导出的环境变量和错误信息。
+// ExecScript executes a script file and returns its exit code, exported environment variables, and error.
 //
-// 执行流程：
-//  1. 构建 script 实例并应用所有选项
-//  2. 构建脱敏替换器
-//  3. 根据文件扩展名选择解释器（.py → Python，其他 → 系统 Shell）
-//  4. 从退出码文件读取真实退出码（包装脚本捕获的值比 ProcessState 更准确）
-//  5. 解析脚本导出的环境变量
+// Execution flow:
+//  1. Create a script instance and apply all options.
+//  2. Build the redaction replacer.
+//  3. Select the interpreter by extension (.py -> Python; otherwise -> system shell).
+//  4. Read the script exit code from the file written by the wrapper.
+//  5. Parse the environment variables exported by the script.
 //
-// 退出码设计：包装脚本通过 XEXEC_EXIT_CODE_FILE 环境变量指定的文件写入退出码，
-// 比直接读取 cmd.ProcessState.ExitCode() 更可靠（能正确处理 set -e 等场景）。
+// The wrapper writes the exit code to the file specified by XEXEC_EXIT_CODE_FILE,
+// allowing script-level exit codes to be preserved in cases such as set -e.
 func ExecScript(ctx context.Context, path string, options ...ScriptOption) (code int, env map[string]any, err error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -81,10 +81,10 @@ func ExecScript(ctx context.Context, path string, options ...ScriptOption) (code
 	s.exitCodePath = filepath.Join(os.TempDir(), s.randomFilename("exitCode", ".txt"))
 	s.saveEnvPath = filepath.Join(os.TempDir(), s.randomFilename("saveEnv", ".txt"))
 	s.abs()
-	_ = os.Chmod(path, os.ModePerm) // 确保脚本文件有执行权限
+	_ = os.Chmod(path, os.ModePerm) // Ensure the script is executable.
 	_, err = os.Stat(path)
 	if err != nil {
-		return 255, nil, fmt.Errorf("stat script: %w", err)
+		return 255, nil, &Error{Op: "stat script", Path: path, Err: err}
 	}
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	defer func() {
@@ -96,7 +96,7 @@ func ExecScript(ctx context.Context, path string, options ...ScriptOption) (code
 		option(s)
 	}
 
-	// 构建脱敏替换器：将 secrets 列表转换为 [secret, "***", ...] 的替换对
+	// Build replacement pairs [secret, "***", ...] from the secrets list.
 	replacements := make([]string, 0, len(s.secrets)*2)
 	for _, secret := range s.secrets {
 		replacements = append(replacements, secret, "***")
@@ -106,13 +106,13 @@ func ExecScript(ctx context.Context, path string, options ...ScriptOption) (code
 	}
 
 	defer func() {
-		// 若上下文已取消，优先返回 context 错误（超时/取消比脚本错误更重要）
+		// Prefer context errors on cancellation or timeout over script errors.
 		if s.ctx.Err() != nil {
 			err = s.ctx.Err()
 		}
 	}()
 	code, err = s.execScript()
-	// 优先使用包装脚本写入的退出码文件（更准确），失败则保留 ProcessState 的值
+	// Prefer the wrapper's exit-code file; retain the ProcessState value if parsing fails.
 	code1, err1 := s.parseExitCodeFromFile()
 	if err1 == nil {
 		code = code1
@@ -121,7 +121,7 @@ func ExecScript(ctx context.Context, path string, options ...ScriptOption) (code
 	return code, env, err
 }
 
-// abs 将脚本路径转换为绝对路径。
+// abs converts the script path to an absolute path.
 func (s *script) abs() {
 	if filepath.IsAbs(s.path) {
 		s.path = filepath.Clean(s.path)
@@ -129,7 +129,7 @@ func (s *script) abs() {
 	s.path = filepath.Join(s.dir, s.path)
 }
 
-// execScript 根据文件扩展名分发到对应的执行逻辑。
+// execScript dispatches execution based on the file extension.
 func (s *script) execScript() (code int, err error) {
 	ext := filepath.Ext(s.path)
 	switch ext {
@@ -140,21 +140,21 @@ func (s *script) execScript() (code int, err error) {
 	}
 }
 
-// randomFilename 生成包含纳秒时间戳的唯一临时文件名，防止并发执行时文件名冲突。
+// randomFilename includes a nanosecond timestamp to avoid concurrent temporary filename collisions.
 func (s *script) randomFilename(prefix, ext string) string {
 	return fmt.Sprintf("%s-%d%s", prefix, time.Now().UnixNano(), ext)
 }
 
-// execPythonScript 通过 Python 包装脚本执行目标 Python 文件。
+// execPythonScript executes the target Python file through a Python wrapper.
 //
-// 使用 runpy.run_path 而非直接执行，原因：
-//   - 正确设置 __main__ 上下文，使 if __name__ == '__main__' 生效
-//   - 正确透传 sys.argv（脚本路径 + 用户参数）
-//   - 捕获 SystemExit 异常，将退出码写入文件，保证退出码的准确性
-//   - -u 参数禁用 Python 输出缓冲，确保实时看到脚本输出
+// Reasons for using runpy.run_path rather than direct execution:
+//   - Set the __main__ context so that if __name__ == '__main__' works.
+//   - Forward sys.argv correctly (script path followed by user arguments).
+//   - Catch SystemExit and write the exit code to a file.
+//   - Use -u to disable Python output buffering for real-time output.
 func (s *script) execPythonScript() (code int, err error) {
-	// 目标脚本路径通过 XEXEC_TARGET 环境变量传入，而非插值进脚本文本，
-	// 避免路径含引号、反斜杠等特殊字符时破坏 Python raw string 语法。
+	// Pass the target path through XEXEC_TARGET rather than interpolating it into script text,
+	// avoiding Python raw-string syntax errors for paths containing quotes or backslashes.
 	wrapperContent := `# -*- coding: utf-8 -*-
 import sys
 import os
@@ -163,7 +163,7 @@ import runpy
 exit_code = 0
 script_path = os.environ['XEXEC_TARGET']
 
-# 设置 sys.argv，第一个参数是脚本路径，后续是传入的参数
+# Set sys.argv: the script path first, followed by the supplied arguments.
 sys.argv = [script_path] + sys.argv[1:]
 
 try:
@@ -174,7 +174,7 @@ except SystemExit as e:
     elif isinstance(e.code, int):
         exit_code = e.code
     else:
-        # sys.exit("message") 形式：打印消息到 stderr，退出码规范化为 1
+        # sys.exit("message"): print the message to stderr and normalize the exit code to 1.
         print(e.code, file=sys.stderr)
         exit_code = 1
 except Exception:
@@ -198,8 +198,8 @@ finally:
 	if err = os.WriteFile(wrapperPath, []byte(wrapperContent), os.ModePerm); err != nil {
 		return 255, err
 	}
-	// 解释器探测：优先 python3（大量现代 Linux/macOS 不再提供 python），
-	// 回退 python，最后回退 Windows 的 py launcher。
+	// Prefer python3, since many modern Linux/macOS systems no longer provide python;
+	// fall back to python, then the Windows py launcher.
 	python := "python3"
 	for _, candidate := range []string{"python3", "python", "py"} {
 		if _, lookErr := exec.LookPath(candidate); lookErr == nil {
@@ -211,18 +211,18 @@ finally:
 	return s.exec(python, args...)
 }
 
-// exec 执行指定命令，并发读取 stdout/stderr 并实时输出日志。
+// exec runs a command, consuming stdout/stderr concurrently and logging output in real time.
 //
-// 使用两个 goroutine 分别读取 stdout 和 stderr，通过 WaitGroup 等待两者完成后再返回，
-// 防止在 cmd.Wait() 之前缓冲区溢出导致进程阻塞。
-// "no child processes" 错误表示进程已被其他线程回收（僵尸进程），静默忽略此错误。
+// Two goroutines read stdout and stderr; a WaitGroup ensures both finish before returning,
+// preventing a full output pipe from blocking the child while cmd.Wait() waits.
+// startManaged registers wait ownership, so the internal reaper cannot steal the child's exit status.
 func (s *script) exec(command string, args ...string) (code int, err error) {
 	s.cmd = exec.CommandContext(s.ctx, command, args...)
 	s.cmd.Env = s.mergeEnv()
 	if s.dir != "" {
 		s.cmd.Dir = s.dir
 	}
-	s.beforeExec() // 平台特定的进程属性设置（进程组、隐藏窗口等）
+	s.beforeExec() // Configure platform-specific process attributes (process group, hidden window, etc.).
 	if s.stdin != nil {
 		s.cmd.Stdin = s.stdin
 	}
@@ -232,8 +232,16 @@ func (s *script) exec(command string, args ...string) (code int, err error) {
 	}
 	stderr, err := s.cmd.StderrPipe()
 	if err != nil {
+		_ = stdout.Close()
 		return 255, err
 	}
+	release, err := defaultReaper.startManaged(s.cmd)
+	if err != nil {
+		_ = stdout.Close()
+		_ = stderr.Close()
+		return 255, err
+	}
+	defer release() // Keep wait ownership registered until Wait has completed.
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
@@ -244,17 +252,8 @@ func (s *script) exec(command string, args ...string) (code int, err error) {
 		defer wg.Done()
 		s.consoleOutput("STDERR", stderr)
 	}()
-	err = s.cmd.Run()
-	wg.Wait() // 等待输出读取完毕，防止日志截断
-
-	// 僵尸进程被操作系统提前回收时会产生此错误，属于正常情况，忽略。
-	// 触发场景：宿主进程把 SIGCHLD 设为 SIG_IGN 或自带 wait(-1) 的 reaper，
-	// 抢在本库 wait4 之前回收了子进程，使 ProcessState 无法得到退出码。
-	// 此时真实退出码已由 wrapper 写入退出码文件，由 parseExitCodeFromFile 兜底，
-	// 故这里清空错误、不让 ECHILD 污染返回值。
-	if err != nil && strings.Contains(err.Error(), "waitid: no child processes") {
-		err = nil
-	}
+	err = s.cmd.Wait()
+	wg.Wait() // Wait for output readers to finish.
 
 	if err != nil {
 		code = 255
@@ -265,33 +264,33 @@ func (s *script) exec(command string, args ...string) (code int, err error) {
 	return code, err
 }
 
-// parseExitCodeFromFile 从退出码文件中读取并解析退出码数字。
+// parseExitCodeFromFile reads and parses the exit code from its file.
 //
-// 包装脚本在退出前将真实退出码写入文件，
-// 比读取 ProcessState.ExitCode() 更准确，能正确反映脚本内部 exit 调用的值。
+// The wrapper writes the script's exit code before exiting,
+// preserving script-level exit values independently of ProcessState.ExitCode().
 func (s *script) parseExitCodeFromFile() (int, error) {
 	data, err := os.ReadFile(s.exitCodePath)
 	if err != nil {
-		return 255, fmt.Errorf("read code file error: %w", err)
+		return 255, &Error{Op: "read code file", Path: s.exitCodePath, Err: err}
 	}
 
 	matches := digitRe.FindString(string(bytes.TrimSpace(data)))
 	if matches == "" {
-		return 255, fmt.Errorf("no valid exit code found")
+		return 255, &Error{Op: "no valid exit code found", Path: s.exitCodePath, Value: string(data)}
 	}
 
 	return strconv.Atoi(matches)
 }
 
-// mergeEnv 合并系统环境变量和自定义环境变量，自定义环境变量优先级更高。
+// mergeEnv merges system and custom environment variables; custom values take precedence.
 //
-// 合并策略：先用 map 收集系统环境变量，再用自定义变量覆盖同名键，
-// 最后追加 XEXEC_EXIT_CODE_FILE 和 XEXEC_SAVE_ENV_FILE 两个内置变量，
-// 供包装脚本写入退出码和导出环境变量。
+// First collect system variables in a map, then override matching keys with custom values.
+// Finally append the built-in target path, exit-code file, and exported-environment file variables
+// so the wrapper can locate the script and write its exit code and exported variables.
 func (s *script) mergeEnv() []string {
 	envMap := make(map[string]string)
 
-	// 先加载系统环境变量作为基础
+	// Load system environment variables as the baseline.
 	for _, env := range syscall.Environ() {
 		key := s.getEnvKey(env)
 		if key != "" {
@@ -299,7 +298,7 @@ func (s *script) mergeEnv() []string {
 		}
 	}
 
-	// 自定义环境变量覆盖同名系统变量（优先级更高）
+	// Custom values override system variables with the same name.
 	for _, env := range s.env {
 		key := s.getEnvKey(env)
 		if key != "" {
@@ -312,12 +311,12 @@ func (s *script) mergeEnv() []string {
 		result = append(result, env)
 	}
 
-	// 注入内置变量：
-	//   - XEXEC_TARGET：目标脚本绝对路径，由包装脚本从环境变量读取，
-	//     避免将路径字符串插值进脚本文本时的转义/注入问题（路径含引号、空格、
-	//     反斜杠、中文等特殊字符均安全）
-	//   - XEXEC_EXIT_CODE_FILE / XEXEC_SAVE_ENV_FILE：脚本通过这两个变量
-	//     找到文件路径并写入退出码与导出的环境变量
+	// Inject built-in variables:
+	//   - XEXEC_TARGET: the absolute target path, read by the wrapper from the environment,
+	//     avoiding escaping and injection issues from interpolating paths into script text.
+	//     Quotes, spaces, backslashes, and Chinese characters in paths are safe.
+	//   - XEXEC_EXIT_CODE_FILE / XEXEC_SAVE_ENV_FILE: the script uses these variables
+	//     to locate the files for its exit code and exported environment variables.
 	result = append(
 		result,
 		fmt.Sprintf("XEXEC_TARGET=%s", s.path),
@@ -328,7 +327,7 @@ func (s *script) mergeEnv() []string {
 	return result
 }
 
-// getEnvKey 从 "KEY=VALUE" 格式的环境变量字符串中提取键名。
+// getEnvKey extracts the key from a KEY=VALUE environment string.
 func (s *script) getEnvKey(env string) string {
 	key, _, found := strings.Cut(env, "=")
 	if !found {
@@ -337,14 +336,14 @@ func (s *script) getEnvKey(env string) string {
 	return key
 }
 
-// parseSaveEnvFile 解析脚本通过 XEXEC_SAVE_ENV_FILE 导出的环境变量文件。
+// parseSaveEnvFile parses the environment file exported through XEXEC_SAVE_ENV_FILE.
 //
-// 文件格式支持两种语法：
-//   - 单行：KEY=VALUE
-//   - 多行：KEY<<DELIMITER\n...\nDELIMITER（类似 Bash here-document）
+// Two file formats are supported:
+//   - Single line: KEY=VALUE
+//   - Multiline: KEY<<DELIMITER\n...\nDELIMITER (like a Bash here-document)
 //
-// 安全机制：禁止脚本覆盖系统已有的环境变量（通过 os.LookupEnv 检查），
-// 防止脚本通过此机制篡改进程级别的环境变量（如 PATH、HOME 等）。
+// Safety: scripts cannot override existing system environment variables (checked with os.LookupEnv),
+// preventing changes to process-level variables such as PATH and HOME through this mechanism.
 func (s *script) parseSaveEnvFile() map[string]any {
 	var saveEnv = make(map[string]any)
 	file, err := os.Open(s.saveEnvPath)
@@ -357,13 +356,13 @@ func (s *script) parseSaveEnvFile() map[string]any {
 
 	scanner := bufio.NewScanner(file)
 	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 10*1024*1024) // 单行最大 10MB，支持大段 JSON 值
+	scanner.Buffer(buf, 10*1024*1024) // Allow lines up to 10 MB for large JSON values.
 
 	firstLine := true
 	for scanner.Scan() {
 		line := scanner.Text()
 
-		// 处理 UTF-8 BOM（Windows 平台上某些编辑器会在文件开头插入 BOM）
+		// Handle UTF-8 BOMs inserted at the beginning of files by some Windows editors.
 		if firstLine {
 			firstLine = false
 			if len(line) >= 3 && line[0] == 0xEF && line[1] == 0xBB && line[2] == 0xBF {
@@ -376,10 +375,10 @@ func (s *script) parseSaveEnvFile() map[string]any {
 			continue
 		}
 
-		// 解析逻辑：通过 << 和 = 的相对位置判断是多行还是单行格式
-		// 情况 A: 只有 =（没有 <<）→ 单行
-		// 情况 B: 有 = 且 = 在 << 前 → 单行（值中包含 << 视为普通字符）
-		// 情况 C: 有 << 且 << 在 = 前（或没有 =）→ 多行 here-document
+		// Choose single-line or multiline parsing based on the relative positions of << and =.
+		// Case A: only = (no <<) -> single line.
+		// Case B: = before << -> single line (<< in the value is ordinary text).
+		// Case C: << before = (or no =) -> multiline here-document.
 		multiKey, multiRest, hasMulti := strings.Cut(line, "<<")
 		singleKey, singleValue, hasSingle := strings.Cut(line, "=")
 
@@ -414,7 +413,7 @@ func (s *script) parseSaveEnvFile() map[string]any {
 				return saveEnv
 			}
 
-			// 禁止覆盖系统环境变量，防止脚本恶意修改进程环境
+			// Disallow overwriting system environment variables to protect the process environment.
 			if _, exists := os.LookupEnv(key); exists {
 				s.logger.Warnf("[SYSTEM] ignored attempt to overwrite system variable: %s", key)
 				continue

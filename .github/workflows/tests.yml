@@ -1,0 +1,60 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  platform-tests:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Static analysis
+        run: go vet ./...
+      - name: Race tests and coverage
+        run: go test -race -count=1 -timeout=120s '-coverprofile=coverage.out' ./...
+      - name: Coverage report
+        run: go tool cover '-func=coverage.out'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-${{ matrix.os }}
+          path: coverage.out
+          if-no-files-found: ignore
+
+  docker-pid1:
+    name: Docker PID 1 integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Prepare public Go runtime image
+        run: docker pull golang:latest
+      - name: Race tests as PID 1
+        env:
+          XEXEC_DOCKER_COVERPROFILE: coverage-docker-pid1.out
+          XEXEC_DOCKER_TEST_COUNT: '3'
+        run: sh test/test-docker-pid1.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-docker-pid1
+          path: coverage-docker-pid1.out
+          if-no-files-found: ignore

@@ -7,32 +7,32 @@ import (
 	"time"
 )
 
-// consoleOutput 异步读取脚本输出流（stdout 或 stderr），按行处理并输出到日志。
+// consoleOutput asynchronously reads stdout or stderr and logs it line by line.
 //
-// 设计特点：
-//  1. 独立 goroutine 读取数据到缓冲通道，解耦读取和处理，防止读取阻塞导致管道满
-//  2. 按行切分输出：遇到 \n 时立即输出该行，保证实时性
-//  3. 500ms 超时强制刷新：处理脚本输出不带换行符（如进度条）的情况，防止日志长时间不输出
-//  4. 处理 Windows 的 \r\n 行尾：去除 \r 防止日志中出现乱码
-//  5. 管道关闭时刷新缓冲区：确保最后一行没有换行符时也能输出
+// Design:
+//  1. A dedicated goroutine reads into a buffered channel, separating reads from processing.
+//  2. Emit each line as soon as a newline arrives for real-time output.
+//  3. Flush every 500 ms for output without newlines, such as progress bars.
+//  4. Strip carriage returns from Windows CRLF line endings.
+//  5. Flush when the pipe closes, including a final line without a newline.
 func (s *script) consoleOutput(title string, reader io.ReadCloser) {
 	dataChan := make(chan []byte, 16)
 
-	// 独立 goroutine 从管道读取原始字节数据，避免处理逻辑阻塞读取
+	// Read raw pipe bytes in a dedicated goroutine so processing does not block reads.
 	go func() {
-		defer close(dataChan)          // 读取完毕时关闭通道，通知处理 goroutine 结束
-		chunk := make([]byte, 64*1024) // 64KB 读取缓冲区
+		defer close(dataChan)          // Close the channel when reading finishes to notify the processing goroutine.
+		chunk := make([]byte, 64*1024) // 64 KB read buffer
 		for {
 			n, err := reader.Read(chunk)
 			if n > 0 {
-				// 必须拷贝切片，原始 chunk 会被下次 Read 覆盖（数据竞争）
+				// Copy the slice: the next Read overwrites chunk, which would cause a data race.
 				tmp := make([]byte, n)
 				copy(tmp, chunk[:n])
 
 				select {
 				case dataChan <- tmp:
 				case <-s.ctx.Done():
-					// 上下文取消且通道阻塞时，直接退出，防止 goroutine 泄漏
+					// Exit on cancellation if the channel blocks, preventing a goroutine leak.
 					return
 				}
 			}
@@ -53,35 +53,35 @@ func (s *script) consoleOutput(title string, reader io.ReadCloser) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
-	// flushLine 处理单行输出：编码转换（GBK→UTF8）→ 日志脱敏 → 输出
+	// flushLine converts encoding (GBK -> UTF-8), redacts secrets, and logs one line.
 	flushLine := func(lineBytes []byte) {
 		line := string(lineBytes)
-		line = s.transform(line) // 平台特定的字符编码转换
+		line = s.transform(line) // Platform-specific character encoding conversion
 		if s.masker != nil {
-			line = s.masker.Replace(line) // 替换敏感词为 "***"
+			line = s.masker.Replace(line) // Replace sensitive strings with "***".
 		}
 		s.logger.Infof("[%s] %s", title, line)
 	}
 
-	// 提取公共的按行处理逻辑
+	// Shared line-by-line processing logic
 	processBuf := func() {
 		for {
 			if buf.Len() == 0 {
 				break
 			}
 
-			// 使用 bytes.Cut 替代 bytes.IndexByte，避免某些 go fix 版本 panic
+			// Use bytes.Cut rather than bytes.IndexByte to avoid panics in some go fix versions.
 			line, _, found := bytes.Cut(buf.Bytes(), []byte{'\n'})
 			if !found {
-				break // 没有完整的行，等待更多数据
+				break // No complete line yet; wait for more data.
 			}
 
-			// 获取完整一行（包含 \n）的长度，并从缓冲区中消费掉这部分数据
+			// Consume the complete line, including its newline, from the buffer.
 			consumeLen := len(line) + 1
 			lineBytes := buf.Next(consumeLen)
-			lineBytes = lineBytes[:len(lineBytes)-1] // 去除 \n
+			lineBytes = lineBytes[:len(lineBytes)-1] // Remove the newline.
 
-			// 去除 Windows 行尾的 \r（Carriage Return）
+			// Remove the carriage return from Windows line endings.
 			if len(lineBytes) > 0 && lineBytes[len(lineBytes)-1] == '\r' {
 				lineBytes = lineBytes[:len(lineBytes)-1]
 			}
@@ -93,7 +93,7 @@ func (s *script) consoleOutput(title string, reader io.ReadCloser) {
 		select {
 		case data, ok := <-dataChan:
 			if !ok {
-				// 通道关闭，说明读取 goroutine 已结束，刷新缓冲区中残留的最后一行
+				// The reader has finished; flush any remaining final line.
 				if buf.Len() > 0 {
 					flushLine(buf.Bytes())
 				}
@@ -104,14 +104,14 @@ func (s *script) consoleOutput(title string, reader io.ReadCloser) {
 			processBuf()
 
 		case <-ticker.C:
-			// 超时强制刷新：防止脚本输出不带换行符时日志长时间没有输出（如进度条场景）
+			// Flush periodically to keep output without newlines (such as progress bars) visible.
 			if buf.Len() > 0 {
 				flushLine(buf.Bytes())
 				buf.Reset()
 			}
 
 		case <-s.ctx.Done():
-			// 上下文取消（超时或手动取消），尽量消费掉通道内残余的数据
+			// On cancellation or timeout, drain as much remaining channel data as possible.
 		drainLoop:
 			for {
 				select {
@@ -125,10 +125,10 @@ func (s *script) consoleOutput(title string, reader io.ReadCloser) {
 				}
 			}
 
-			// 处理完积压数据后，按行提取输出
+			// Process the drained data line by line.
 			processBuf()
 
-			// 将没有换行符的最后一部分也强行输出
+			// Also emit the final fragment even if it has no newline.
 			if buf.Len() > 0 {
 				flushLine(buf.Bytes())
 			}

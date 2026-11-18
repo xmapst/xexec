@@ -3,34 +3,32 @@
 package xexec
 
 import (
-	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"runtime/debug"
 )
 
-// execSysScript 在 Unix/Linux 平台上通过 sh 包装脚本执行目标脚本。
+// execSysScript runs the target script through an sh wrapper on Unix/Linux.
 //
-// 包装脚本的作用：
-//  1. 通过 trap 捕获 EXIT/INT/TERM 信号，确保无论何种原因退出都会写入退出码文件
-//  2. 以 "$@" 方式传递参数，正确处理含空格的参数
-//  3. 条件写入（[ ! -f ]）防止重复写入覆盖已有的退出码
+// The wrapper:
+//  1. Uses traps for EXIT/INT/TERM to write the exit-code file when the shell exits.
+//  2. Forwards arguments with "$@", preserving spaces within arguments.
+//  3. Writes only if the file does not exist, preserving an exit code already recorded.
 //
-// 为什么用 wrapper + trap 而不是让 sh 直接 exec 目标脚本：
-// exec 会用目标进程映像替换 sh，之后不再有任何代码能运行，退出码就只能
-// 依赖 Go 侧 cmd.Wait()/ProcessState 获取。但 xexec 是库，无法控制宿主进程
-// 的 SIGCHLD 处置——若宿主把 SIGCHLD 设为 SIG_IGN 或自带 wait(-1) 的
-// reaper，子进程可能在 Go 调用 wait4 之前就被抢先回收，导致 ECHILD
-// （exec() 中特判的 "waitid: no child processes"），退出码永久丢失退化为 255。
-// trap 让 sh 留在原地、在目标结束后把真实退出码写入文件，该文件由脚本自己
-// 写入、不依赖谁来 wait()，因此对外部 reaper 抢收免疫。这是刻意的健壮性取舍，
-// 不要为了少一层进程而改成 exec。
+// Why use a wrapper and trap instead of exec to replace sh with the target:
+// The wrapper remains available to record the script-level exit code after the target exits.
+// This supports the exit-code file convention without relying solely on ProcessState.
+// Execution starts through startManaged, which registers wait ownership,
+// and completes with Cmd.Wait. The internal reaper does not collect registered children.
+// An unrelated external wait(-1) reaper or SIGCHLD=SIG_IGN is unsupported:
+// it can consume or discard the status before Cmd.Wait observes it.
+// Any resulting ECHILD error is returned, not suppressed; an exit-code file
+// cannot restore the missing wait status or make such external reapers safe.
 func (s *script) execSysScript() (code int, err error) {
 	_ = os.Chmod(s.path, os.ModePerm)
-	// 目标脚本路径通过 XEXEC_TARGET 环境变量传入，而非插值进脚本文本，
-	// 避免路径含特殊字符时破坏 shell 引号或构成命令注入。
-	// 不使用 local（非 POSIX）；printf 替代 echo 以规避实现差异。
+	// Pass the target path through XEXEC_TARGET rather than interpolating script text,
+	// avoiding broken shell quoting or command injection from special characters in paths.
+	// Avoid non-POSIX local; use printf rather than echo for consistent behavior.
 	wrapperContent := `#!/bin/sh
 _save_exit_code() {
 	code=$?
@@ -47,27 +45,27 @@ trap _save_exit_code EXIT INT TERM
 	}()
 
 	if err = os.WriteFile(wrapperPath, []byte(wrapperContent), os.ModePerm); err != nil {
-		return 255, fmt.Errorf("failed to create wrapper script: %w", err)
+		return 255, &Error{Op: "failed to create wrapper script", Path: wrapperPath, Err: err}
 	}
 
 	args := append([]string{wrapperPath}, s.args...)
 	return s.exec("sh", args...)
 }
 
-// beforeExec 在 Unix 平台上配置进程属性。
+// beforeExec configures process attributes on Unix.
 //
-// 设置新进程组（Setpgid=true）的目的：
-//   - 使子进程和其派生的所有子进程形成独立进程组
-//   - 取消时通过 Kill(-pid, SIGKILL) 向整个进程组发送信号，确保所有子进程都被终止
-//   - 防止孤儿进程（orphan process）残留
+// A new process group (Setpgid=true) allows:
+//   - The child and its descendants to share an isolated process group.
+//   - Cancellation to signal the whole group with Kill(-pid, SIGKILL).
+//   - Cleanup of descendants that would otherwise remain orphaned.
 //
-// cmd.Cancel 钩子在上下文取消时调用，实现级联终止整个进程树。
+// The cmd.Cancel hook runs on context cancellation and terminates the process tree.
 func (s *script) beforeExec() {
-	// SysProcAttr 按平台构建（见 sysProcAttr）：
-	//   - 所有 Unix 平台都设 Setpgid，使子进程成为新进程组组长，
-	//     cancel 中的 Kill(-pid, SIGKILL) 即可终止整个进程组。
-	//   - Linux/FreeBSD 额外设 Pdeathsig=SIGKILL，使 Go 进程异常退出
-	//     （崩溃 / kill -9，defer cancel 来不及执行）时内核自动清理子进程。
+	// Build SysProcAttr for the platform (see sysProcAttr):
+	//   - All Unix platforms set Setpgid, making the child a new process group leader.
+	//     Kill(-pid, SIGKILL) in cancel can then terminate the entire group.
+	//   - Linux/FreeBSD also set Pdeathsig=SIGKILL for kernel-driven child cleanup
+	//     if Go crashes or is killed before defer cancel can run.
 	s.cmd.SysProcAttr = sysProcAttr()
 
 	s.cmd.Cancel = func() error {
@@ -75,40 +73,27 @@ func (s *script) beforeExec() {
 			if r := recover(); r != nil {
 				s.logger.Errorf("[SYSTEM] cmd cancel panic: %v\n%s", r, string(debug.Stack()))
 			}
-			// 写入 137（128 + SIGKILL 信号编号 9）作为标准的被杀死退出码
+			// Write 137 (128 + SIGKILL signal number 9) as the standard killed exit code.
 			_ = os.WriteFile(s.exitCodePath, []byte("137"), os.ModePerm)
 		}()
 
 		if s.cmd.Process == nil {
-			return fmt.Errorf("process not started")
+			return errProcessNotStarted
 		}
 
-		var errs error
-		pid := s.cmd.Process.Pid
-
-		// 先终止进程本身
-		if err := s.cmd.Process.Kill(); err != nil {
-			errs = errors.Join(errs, fmt.Errorf("kill process: %w", err))
-		}
-
-		// 再向整个进程组发送 SIGKILL，确保子进程也被终止（-pid 表示进程组 ID）
-		if err := KillAll(pid); err != nil {
-			errs = errors.Join(errs, fmt.Errorf("kill process group: %w", err))
-		}
-
-		if errs != nil {
-			return fmt.Errorf("error cancelling pid=%d: %w", pid, errs)
+		if err := KillAll(int32(s.cmd.Process.Pid)); err != nil {
+			return &Error{Op: "error cancelling", PID: int64(s.cmd.Process.Pid), Err: err}
 		}
 		return nil
 	}
 }
 
-// utf8ToGb2312 在非 Windows 平台上为空操作，Linux/macOS 默认使用 UTF-8。
+// utf8ToGb2312 is a no-op outside Windows; Linux/macOS use UTF-8 by default.
 func (s *script) utf8ToGb2312(line string) string {
 	return line
 }
 
-// transform 在非 Windows 平台上直接返回原始字符串，不进行编码转换。
+// transform returns the original string without encoding conversion outside Windows.
 func (s *script) transform(line string) string {
 	return line
 }

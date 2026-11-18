@@ -1,12 +1,12 @@
 @echo off
 echo Hello World
-echo 参数1: %1
-echo 参数2: %2
-echo 所有参数: %*
-REM 从标准输入读取每一行
+echo Argument 1: %1
+echo Argument 2: %2
+echo All arguments: %*
+REM Read each line from stdin
 for /f "delims=" %%i in ('more') do (
     echo Line: %%i
 )
 
-REM 持续ping
+REM Ping continuously
 ping -t 1.1.1.1

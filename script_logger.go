@@ -5,11 +5,11 @@ import (
 	"log/slog"
 )
 
-// ILogger 脚本执行器的日志接口，支持自定义日志后端。
+// ILogger is the script executor's logging interface, supporting custom backends.
 //
-// 通过接口抽象解耦日志实现与脚本执行逻辑，
-// 调用方可通过 WithScriptLogger 选项注入自定义实现（如 xlog、zap 等），
-// 默认使用标准库 slog 输出到 stderr。
+// The interface decouples logging from script execution.
+// Callers can inject implementations such as xlog or zap through WithScriptLogger.
+// By default, the standard library's slog writes to stderr.
 type ILogger interface {
 	Debugf(format string, args ...any)
 	Infof(format string, args ...any)
@@ -17,10 +17,10 @@ type ILogger interface {
 	Errorf(format string, args ...any)
 }
 
-// defaultLogger 基于标准库 slog 的默认日志实现。
+// defaultLogger implements logging through the standard library's slog.
 //
-// 当 args 为空时直接使用 format 字符串作为消息，
-// 避免 fmt.Sprintf 在无参数时产生多余的格式化开销。
+// When args is empty, use format directly as the message,
+// avoiding unnecessary fmt.Sprintf overhead.
 type defaultLogger struct{}
 
 func (l *defaultLogger) Debugf(format string, args ...any) {

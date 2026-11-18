@@ -1,12 +1,12 @@
 echo "Hello World"
-echo "脚本路径: $0"
-echo "参数1: $1"
-echo "参数2: $2"
-echo "所有参数: $@"
-echo "参数数量: $#"
+echo "Script path: $0"
+echo "Argument 1: $1"
+echo "Argument 2: $2"
+echo "All arguments: $@"
+echo "Argument count: $#"
 while read line; do
   echo "Line: $line"
 done
 exit 123
-# 持续ping
+# Ping continuously
 ping 1.1.1.1
