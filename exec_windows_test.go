@@ -18,15 +18,15 @@ import (
 
 const windowsTreeHelperEnv = "XEXEC_WINDOWS_TREE_HELPER"
 
-// Run owned helpers without a console. A console-subsystem executable started
-// by a headless CI runner can otherwise acquire OS-managed console-host
-// processes, which are not part of the two-process fixture and may not grant
-// PROCESS_TERMINATE access. HideWindow only hides a window; it does not prevent
-// console allocation.
+// Run owned helpers detached from any console. CREATE_NO_WINDOW suppresses the
+// console window but can still allocate a headless console and its host process.
+// DETACHED_PROCESS prevents console attachment/allocation at process creation,
+// keeping OS-managed console hosts outside this two-process fixture. Redirected
+// standard handles still work, so CombinedOutput can capture helper failures.
 func windowsTreeHelperCommand(mode string) *exec.Cmd {
 	cmd := exec.Command(os.Args[0], "-test.run=^TestWindowsProcessTreeHelper$")
 	cmd.Env = append(os.Environ(), windowsTreeHelperEnv+"="+mode)
-	cmd.SysProcAttr = &windows.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
+	cmd.SysProcAttr = &windows.SysProcAttr{CreationFlags: windows.DETACHED_PROCESS}
 	return cmd
 }
 

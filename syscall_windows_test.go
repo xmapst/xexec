@@ -167,8 +167,15 @@ func TestWindowsNativeTreeRejectsStaleAndReusedPIDs(t *testing.T) {
 		children: map[uint32][]uint32{10: {20, 30, 40}, 20: {50}, 30: {60}},
 		created:  map[uint32]uint64{10: 10, 20: 9, 30: 101, 40: 11},
 	}
-	if err := killWindowsTree(10, f.ops()); err == nil {
+	err := killWindowsTree(10, f.ops())
+	if err == nil {
 		t.Fatal("identity uncertainty was discarded")
+	}
+	if detail, ok := errors.AsType[*Error](err); !ok || detail.PID != 20 || detail.Value != "parent_pid=10 parent_created=10 child_created=9 cutoff=100" {
+		t.Fatalf("stale-parent diagnostics lost: %v", err)
+	}
+	if !strings.Contains(err.Error(), "parent_pid=10 parent_created=10 child_created=101 cutoff=100") {
+		t.Fatalf("post-cutoff diagnostics lost: %v", err)
 	}
 	if !reflect.DeepEqual(f.killed, []uint32{40, 10}) {
 		t.Fatalf("unsafe targets terminated: %v", f.killed)

@@ -4,6 +4,7 @@ package xexec
 
 import (
 	"errors"
+	"fmt"
 	"time"
 	"unsafe"
 
@@ -131,7 +132,11 @@ func killWindowsTree(rootPID int32, ops windowsTreeOps) error {
 			// Reject stale parent IDs and PIDs reused after snapshot acquisition began.
 			if child.created < process.created || child.created > cutoff {
 				child.close()
-				errs = errors.Join(errs, &Error{Op: "process identity changed or parent relationship is stale", PID: int64(childPID)})
+				errs = errors.Join(errs, &Error{
+					Op:    "process identity changed or parent relationship is stale",
+					PID:   int64(childPID),
+					Value: fmt.Sprintf("parent_pid=%d parent_created=%d child_created=%d cutoff=%d", pid, process.created, child.created, cutoff),
+				})
 				continue
 			}
 			visit(childPID, child)
