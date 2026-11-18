@@ -1,6 +1,6 @@
 # xexec
 
-`xexec` 是一个对 Go 标准库 [`os/exec`](https://pkg.go.dev/os/exec) 的增强封装，统一提供异步命令执行、跨平台脚本执行、进程组终止和 Linux PID 1 孤儿回收能力。
+`xexec` 是一个对 Go 标准库 [`os/exec`](https://pkg.go.dev/os/exec) 的增强封装，统一提供异步命令执行、跨平台脚本执行、进程组终止和 Linux PID 1 孤儿回收能力。仅支持 Linux、Windows 和 macOS（Darwin）。
 
 该项目重点解决以下问题：
 
@@ -19,17 +19,17 @@
 
 每次执行在临时目录创建独立的 console 日志，stdout/stderr 共用该实例的锁与轮转状态，默认上限为 50 MiB，不会与相同命令的其他实例混写。
 
-默认 `WaitDelay` 为 250ms，限制根进程退出或 context 取消后的输出排空等待。后台后代持有输出管道且超限时，`Wait()` 返回等待错误；对于 `exec.ErrWaitDelay`，还会尝试清理剩余进程组。Unix 可在组长退出后终止同组后代；Windows 使用原生进程快照和进程句柄清理后代；根进程已退出、并发创建新后代或 PID 复用时，不保证清理整棵树，清理错误会保留在返回值中。
+默认 `WaitDelay` 为 250ms，限制根进程退出或 context 取消后的输出排空等待。后台后代持有输出管道且超限时，`Wait()` 返回等待错误；对于 `exec.ErrWaitDelay`，还会尝试清理剩余进程组。Linux / macOS 可在组长退出后终止同组后代；Windows 使用原生进程快照和进程句柄清理后代；根进程已退出、并发创建新后代或 PID 复用时，不保证清理整棵树，清理错误会保留在返回值中。
 
 ## 功能特性
 
 ### 1. 多脚本类型执行
 
-核心入口 [`ExecScript()`](script.go:72) 会根据脚本扩展名自动选择执行方式：
+核心入口 [`ExecScript()`](script.go:61) 会根据脚本扩展名自动选择执行方式：
 
 - Python 脚本：`.py`、`.py3`
 - Windows 脚本：`.ps1`、`.ps`、`.bat` 等
-- Unix/Linux Shell 脚本：如 `.sh`
+- Linux / macOS Shell 脚本：如 `.sh`
 
 其中：
 
@@ -40,10 +40,10 @@
 
 实现位置可参考：
 
-- [`script.execScript()`](script.go:133)
-- [`script.execPythonScript()`](script.go:155)
-- [`script.execSysScript()`](script_windows.go:39)
-- [`script.execSysScript()`](script_other.go:20)
+- [`script.execScript()`](script.go:122)
+- [`script.execPythonScript()`](script_python.go:16)
+- [`script.execSysScript()`](script_windows.go:24)
+- [`script.execSysScript()`](script_unix.go:27)
 
 ### 2. 更可靠的退出码获取
 
@@ -55,19 +55,19 @@
 - `XEXEC_EXIT_CODE_FILE`
 - `XEXEC_SAVE_ENV_FILE`
 
-包装脚本在退出时会主动把真实退出码写入文件，然后由 Go 侧通过 [`script.parseExitCodeFromFile()`](script.go:250) 读取，这使得退出码结果通常比单纯读取进程状态更可靠。
+包装脚本在退出时会主动把真实退出码写入文件，然后由 Go 侧通过 [`script.parseExitCodeFromFile()`](script_exitcode.go:19) 读取，这使得退出码结果通常比单纯读取进程状态更可靠。
 
 退出码文件是 `cmd.Wait()` 的补充，而不是替代：命令启动和 PID 等待权登记在同一把锁内完成，内部回收器只回收没有等待所有者的僵尸子进程，因此不会抢走脚本或命令的退出状态。宿主另行执行 `wait(-1)` 或将 `SIGCHLD` 设为 `SIG_IGN` 不在支持范围内；这类行为引发的 `ECHILD` 等等待错误会返回给调用方，不会因为存在退出码文件而被静默忽略。
 
 相关流程可参考：
 
-- [`ExecScript()`](script.go:72)
-- [`script.mergeEnv()`](script.go:269)
-- [`script.parseExitCodeFromFile()`](script.go:250)
+- [`ExecScript()`](script.go:61)
+- [`script.mergeEnv()`](script_environment.go:16)
+- [`script.parseExitCodeFromFile()`](script_exitcode.go:19)
 
 ### 3. 实时输出采集
 
-[`script.exec()`](script.go:201) 会并发读取子进程的 stdout / stderr，并交由 [`script.consoleOutput()`](script_output.go:18) 按行处理。
+[`script.exec()`](script_exec.go:13) 会并发读取子进程的 stdout / stderr，并交由 [`script.consoleOutput()`](script_output.go:18) 按行处理。
 
 输出处理具备以下特点：
 
@@ -80,37 +80,37 @@
 
 对应实现：
 
-- [`script.exec()`](script.go:201)
+- [`script.exec()`](script_exec.go:13)
 - [`script.consoleOutput()`](script_output.go:18)
-- [`script.transform()`](script_windows.go:135)
-- [`script.gbkToUtf8()`](script_windows.go:146)
+- [`script.transform()`](script_encoding_windows.go:23)
+- [`script.gbkToUtf8()`](script_encoding_windows.go:34)
 
 ### 4. 超时取消与进程树清理
 
 `xexec` 基于 [`context.Context`](https://pkg.go.dev/context) 工作，支持超时与主动取消。执行期间如果上下文取消：
 
 - Windows 下通过原生 Toolhelp 进程快照和 `TerminateProcess` 尝试清理进程树；深度优先遍历、后代优先终止，每个分支处理完立即释放句柄，仅保留当前祖先链的句柄，使同时持有的句柄数受树深度而非进程总数限制；汇总清理错误。单次快照不提供 Job Object 那样的进程归属保证
-- Unix/Linux 下通过进程组 + `SIGKILL` 清理子进程组（子进程以 `Setpgid` 成为新进程组组长，`Kill(-pid)` 即可终止整组）
+- Linux / macOS 下通过进程组 + `SIGKILL` 清理子进程组（子进程以 `Setpgid` 成为新进程组组长，`Kill(-pid)` 即可终止整组）
 - 统一将退出码文件写入 `137`，表示被强制终止
 
-此外，在 Linux / FreeBSD 上脚本会设置 `Pdeathsig=SIGKILL`，由内核在父线程死亡时向直接子进程发送信号。它不是整个进程树的崩溃清理保证，需要注意以下边界：
+此外，在 Linux 上脚本会设置 `Pdeathsig=SIGKILL`，由内核在父线程死亡时向直接子进程发送信号。它不是整个进程树的崩溃清理保证，需要注意以下边界：
 
 - `Pdeathsig` 是「单进程级」信号，只能清理 Go 的**直接子进程**（包装 sh）；包装脚本或目标脚本内部 fork 出的孙进程（如脚本里的 `cmd &`）够不到，崩溃时仍可能残留
 - 正常 cancel / 超时路径会通过 `Kill(-pid)` 终止同一进程组；主动通过 `setsid` 等方式脱离进程组的后代不在保证范围内
-- macOS / OpenBSD / NetBSD 等无 `Pdeathsig` 字段的平台仅设 `Setpgid`，崩溃清理能力退化
+- macOS 无 `Pdeathsig` 字段，仅设 `Setpgid`，崩溃清理能力退化
 - 若需要在崩溃场景下也可靠清理整棵进程树，应在部署层通过容器 / systemd cgroup 等边界兜底。孤儿回收只处理已经退出的子进程，不等同于终止仍存活的后代
 
 对应实现：
 
-- [`script.beforeExec()`](script_windows.go:100)
-- [`script.beforeExec()`](script_other.go:53)
-- [`sysProcAttr()`](script_pdeathsig.go:1)
+- [`script.beforeExec()`](script_windows.go:85)
+- [`script.beforeExec()`](script_unix.go:63)
+- [`sysProcAttr()`](process_linux.go:34)
 
 ### 5. 脚本回传环境变量
 
-除了返回退出码外，[`ExecScript()`](script.go:72) 还可以返回 `map[string]any` 类型的环境变量结果。
+除了返回退出码外，[`ExecScript()`](script.go:61) 还可以返回 `map[string]any` 类型的环境变量结果。
 
-脚本只需要把内容写入 `XEXEC_SAVE_ENV_FILE` 指向的文件中，Go 侧就会通过 [`script.parseSaveEnvFile()`](script.go:320) 解析。
+脚本只需要把内容写入 `XEXEC_SAVE_ENV_FILE` 指向的文件中，Go 侧就会通过 [`script.parseSaveEnvFile()`](script_environment.go:73) 解析。
 
 支持两种格式：
 
@@ -146,7 +146,7 @@ EOF
 
 ### 7. 模板变量注入
 
-[`Inject()`](inject.go:39) 提供轻量级字符串变量占位符替换能力，可用于在执行脚本前动态拼装脚本内容、配置模板或命令文本。
+[`Inject()`](inject.go:41) 提供轻量级字符串变量占位符替换能力，可用于在执行脚本前动态拼装脚本内容、配置模板或命令文本。
 
 支持如下占位形式：
 
@@ -163,7 +163,7 @@ EOF
 
 若变量不存在，则保留原始占位符。
 
-实现位置：[`Inject()`](inject.go:39)
+实现位置：[`Inject()`](inject.go:41)
 
 ---
 
@@ -191,8 +191,8 @@ return cmd.Wait()
 - 选项为 `WithExecArgs`、`WithExecWorkingDir`、`WithExecEnv`。
 - 必须调用 **`XCmd.Wait()`**；不要绕过封装调用嵌入的 `Cmd.Wait()`。封装会在等待结束后释放 PID 等待权并关闭控制台输出文件。
 - 命令控制台文件默认最多保留 50 MiB；命令及参数用于生成稳定的文件名指纹。
-- Unix 命令使用独立进程组，Linux / FreeBSD 命令设置 `Pdeathsig=SIGTERM`；脚本继续使用 `Pdeathsig=SIGKILL`。Linux 的父死亡信号跟踪创建子进程的 OS 线程，且只作用于直接子进程。
-- `KillAll(pid int32)` 在 Unix 上优先终止进程组，失败后尝试单独 PID；仅 `ESRCH` 视为幂等成功，其他错误会保留并返回。Unix 拒绝 `pid <= 1`。Windows 拒绝 `pid <= 0` 和 PID 4，使用原生进程快照及句柄进行尽力清理。非法 PID 在发送信号或调用 Windows 原生 API 前返回错误。传入 `os.Process.Pid` 时使用 `int32(process.Pid)`。
+- Linux / macOS 命令使用独立进程组，Linux 命令设置 `Pdeathsig=SIGTERM`；脚本继续使用 `Pdeathsig=SIGKILL`。Linux 的父死亡信号跟踪创建子进程的 OS 线程，且只作用于直接子进程。
+- `KillAll(pid int32)` 在 Linux / macOS 上优先终止进程组，失败后尝试单独 PID；仅 `ESRCH` 视为幂等成功，其他错误会保留并返回。Linux / macOS 拒绝 `pid <= 1`。Windows 拒绝 `pid <= 0` 和 PID 4，使用原生进程快照及句柄进行尽力清理。非法 PID 在发送信号或调用 Windows 原生 API 前返回错误。传入 `os.Process.Pid` 时使用 `int32(process.Pid)`。
 
 ### Linux PID 1 自动回收
 
@@ -209,32 +209,45 @@ return cmd.Wait()
 
 ```text
 .
-├── inject.go              # 变量注入能力
-├── exec.go                # 异步命令与等待权释放
-├── exec_console.go        # 有界控制台文件输出
-├── exec_other.go          # Unix 命令初始化与取消
-├── exec_windows.go        # Windows 命令初始化与取消
-├── reaper.go              # 统一等待权与回收状态
-├── reaper_linux.go        # Linux PID 1 孤儿回收
-├── reaper_other.go        # 其他平台兼容实现
-├── subreaper_linux.go     # Linux 子回收器设置
-├── syscall_other.go       # Unix 进程组终止
-├── syscall_windows.go     # Windows 进程树终止
-├── script.go              # 核心执行流程
-├── script_options.go      # 函数选项
-├── script_output.go       # 输出流处理
-├── script_logger.go       # 日志接口与默认实现
-├── script_windows.go      # Windows 平台实现
-├── script_other.go        # 非 Windows 平台实现
-├── script_pdeathsig.go    # Linux/FreeBSD：Setpgid + Pdeathsig
-├── script_nopdeathsig.go  # 其余 Unix（macOS 等）：仅 Setpgid
-├── test/
-│   ├── test.bat
-│   ├── test.ps1
-│   ├── test.py
-│   └── test.sh
+├── errors.go                   # 公开错误类型、错误链与内部校验错误
+├── inject.go                   # 文本、参数及文件变量注入
+├── exec.go                     # 异步命令入口、启动与等待生命周期
+├── exec_options.go             # 命令配置选项
+├── exec_console.go             # 独立、有界、并发安全的命令日志文件
+├── exec_unix.go                # Linux / macOS 命令初始化与取消
+├── exec_windows.go             # Windows 命令初始化与取消
+├── script.go                   # 脚本入口、状态、临时文件与解释器分派
+├── script_options.go           # 脚本配置选项
+├── script_exec.go              # 脚本命令启动、等待与输出读取协调
+├── script_python.go            # 跨平台 Python 包装器与解释器选择
+├── script_unix.go              # Linux / macOS shell 包装器与取消
+├── script_windows.go           # Windows shell 包装器与取消
+├── script_environment.go       # 脚本环境合并及导出环境解析
+├── script_exitcode.go          # 包装器退出码文件解析
+├── script_output.go            # 脚本输出读取、脱敏与日志刷新
+├── script_encoding_unix.go     # Linux / macOS 输出编码直通
+├── script_encoding_windows.go  # Windows 代码页、GBK 检测与转换
+├── script_logger.go            # 日志接口与默认实现
+├── process_linux.go           # 命令/脚本共用的 Linux 进程属性
+├── process_darwin.go          # 命令/脚本共用的 macOS 进程属性
+├── syscall_unix.go             # Linux / macOS 进程组终止与回退
+├── syscall_windows.go          # Windows 原生进程树终止
+├── reaper.go                   # 统一等待权登记、启动锁与回收协调
+├── reaper_linux.go             # Linux PID 1 扫描、回收与事件循环
+├── reaper_subreaper_linux.go   # Linux subreaper 内核配置
+├── reaper_disabled.go          # Windows / macOS 的回收器空实现
+├── *_test.go                   # 公共行为、错误链及平台专项测试
+├── test/                       # 示例脚本与 Docker PID 1 测试入口
+├── .github/workflows/tests.yml # Linux、Windows、macOS 与 Docker CI
 └── go.mod
 ```
+
+文件按职责而非 API 可见性划分，仍属于同一个 `xexec` 包，不增加新的公开 API 或子包：
+
+- `exec_*` 管理通用程序执行和命令日志；`script_*` 管理脚本包装、脚本环境及日志输出，两者保持不同的输出策略。
+- `process_*` 提供命令与脚本共用的平台进程属性；`syscall_*` 负责进程终止；`reaper_*` 负责等待权和已退出子进程回收，回收不等同于终止存活进程。
+- `_unix.go` 共享实现仅使用 `linux || darwin` 构建标签；`_windows.go` / `_linux.go` / `_darwin.go` 按对应平台编译。`reaper_disabled.go` 仅在 Windows 或 macOS 上启用，与 Linux 回收器互斥。
+- 仅支持 Linux、Windows 和 macOS（`GOOS=darwin`）。父死亡信号与基于 `/proc`、`prctl` 的孤儿回收仅在 Linux 上启用；macOS 使用独立进程组，但不提供父死亡信号或自动孤儿回收。其他 GOOS 不受支持。
 
 ---
 
@@ -294,7 +307,7 @@ func main() {
 
 ### 执行动态生成的脚本内容
 
-使用 [`ExecScriptContent()`](script.go:49) 可以避免自己管理临时文件。
+使用 [`ExecScriptContent()`](script.go:38) 可以避免自己管理临时文件。
 
 ```go
 package main
@@ -318,7 +331,7 @@ func main() {
 
 ## API 说明
 
-### [`ExecScript()`](script.go:72)
+### [`ExecScript()`](script.go:61)
 
 函数签名：
 
@@ -338,7 +351,7 @@ func ExecScript(ctx context.Context, path string, options ...ScriptOption) (code
 - `env`：脚本导出的环境变量
 - `err`：执行错误；若上下文已取消，则优先返回上下文错误
 
-### [`ExecScriptContent()`](script.go:49)
+### [`ExecScriptContent()`](script.go:38)
 
 函数签名：
 
@@ -500,7 +513,7 @@ result := xexec.Inject(content, map[string]any{
 
 ### Windows 中文乱码处理
 
-在 Windows 平台，[`script.transform()`](script_windows.go:135) 会结合系统活动代码页以及 GBK 检测逻辑，必要时自动将输出从 GBK 转成 UTF-8。
+在 Windows 平台，[`script.transform()`](script_encoding_windows.go:23) 会结合系统活动代码页以及 GBK 检测逻辑，必要时自动将输出从 GBK 转成 UTF-8。
 
 这对中文 Windows 环境下执行：
 

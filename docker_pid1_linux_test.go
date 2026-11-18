@@ -12,9 +12,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // Run this test binary directly as the container entrypoint, without docker --init
@@ -62,7 +63,10 @@ func TestDockerPID1(t *testing.T) {
 	})
 	t.Run("live-orphan-is-not-killed", func(t *testing.T) {
 		pid := spawnDockerTestOrphan(t, "10")
-		defer func() { syscall.Kill(pid, syscall.SIGKILL); waitDockerPIDGone(t, pid) }()
+		defer func() {
+			_ = unix.Kill(pid, unix.SIGKILL)
+			waitDockerPIDGone(t, pid)
+		}()
 		// Force multiple real scans while the adopted child remains alive.
 		for range 3 {
 			if err := defaultReaper.scanChildren(); err != nil {

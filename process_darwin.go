@@ -1,13 +1,12 @@
-//go:build !windows && !linux && !freebsd
+//go:build darwin
 
 package xexec
 
 import "syscall"
 
-// sysProcAttr builds process attributes on Unix platforms without Pdeathsig (macOS, OpenBSD, NetBSD,
-// DragonFly, Solaris, etc.).
+// sysProcAttr builds process attributes on macOS without Pdeathsig.
 //
-// These platforms have no Pdeathsig field in syscall.SysProcAttr, so the kernel cannot
+// macOS has no Pdeathsig field in syscall.SysProcAttr, so the kernel cannot
 // terminate the child on parent death this way. Setpgid makes the child a new group leader;
 // Kill(-pid, SIGKILL) on cancellation terminates the group. If Go crashes or is killed,
 // children may survive as orphans, matching this library's earlier behavior on all platforms.

@@ -7,9 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"syscall"
 	"testing"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
@@ -19,7 +19,7 @@ func TestWindowsCommandAttributesAndUnstartedCancel(t *testing.T) {
 	if e.Path != "program.exe" || len(e.Args) != 4 || e.Args[1] != "hello world" || e.Args[2] != "" || e.Args[3] != "&" {
 		t.Fatalf("direct executable arguments changed: %#v", e.Args)
 	}
-	if e.SysProcAttr == nil || !e.SysProcAttr.HideWindow || e.SysProcAttr.CreationFlags&syscall.CREATE_NEW_PROCESS_GROUP == 0 || e.SysProcAttr.CmdLine != "" {
+	if e.SysProcAttr == nil || !e.SysProcAttr.HideWindow || e.SysProcAttr.CreationFlags&windows.CREATE_NEW_PROCESS_GROUP == 0 || e.SysProcAttr.CmdLine != "" {
 		t.Fatalf("unexpected command attributes: %+v", e.SysProcAttr)
 	}
 	if err := e.Cancel(); err == nil {
@@ -29,7 +29,7 @@ func TestWindowsCommandAttributesAndUnstartedCancel(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "exit-code")
 	s := &script{cmd: exec.CommandContext(context.Background(), "program.exe"), exitCodePath: path, logger: &captureTestLogger{}}
 	s.beforeExec()
-	if s.cmd.SysProcAttr == nil || !s.cmd.SysProcAttr.HideWindow || s.cmd.SysProcAttr.CreationFlags&syscall.CREATE_NEW_PROCESS_GROUP == 0 {
+	if s.cmd.SysProcAttr == nil || !s.cmd.SysProcAttr.HideWindow || s.cmd.SysProcAttr.CreationFlags&windows.CREATE_NEW_PROCESS_GROUP == 0 {
 		t.Fatalf("unexpected script attributes: %+v", s.cmd.SysProcAttr)
 	}
 	if err := s.cmd.Cancel(); err == nil {

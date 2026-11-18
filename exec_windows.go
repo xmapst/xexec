@@ -6,7 +6,8 @@ import (
 	"log/slog"
 	"os/exec"
 	"runtime/debug"
-	"syscall"
+
+	"golang.org/x/sys/windows"
 )
 
 // initCmd executes programs directly, preserving argument boundaries and avoiding
@@ -14,8 +15,8 @@ import (
 // Cancellation delegates process-tree termination to KillAll.
 func (e *XCmd) initCmd() {
 	e.Cmd = exec.CommandContext(e.ctx, e.command, e.args...)
-	e.Cmd.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP, // Isolate console signals.
+	e.Cmd.SysProcAttr = &windows.SysProcAttr{
+		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP, // Isolate console signals.
 		HideWindow:    true,                             // Hide the console window.
 	}
 	e.Cmd.Cancel = func() error {

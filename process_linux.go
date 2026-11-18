@@ -1,10 +1,12 @@
-//go:build linux || freebsd
+//go:build linux
 
 package xexec
 
-import "syscall"
+import (
+	"golang.org/x/sys/unix"
+)
 
-// sysProcAttr builds process attributes for platforms supporting Pdeathsig (Linux, FreeBSD).
+// sysProcAttr builds process attributes for Linux.
 //
 // In addition to Setpgid (a new process group for Kill(-pid) cleanup), it sets
 // Pdeathsig=SIGKILL so the kernel sends SIGKILL to the child when its parent thread dies.
@@ -25,15 +27,15 @@ import "syscall"
 // script lifetime is expensive for long-running scripts. In practice, the Go runtime rarely retires
 // created threads, so premature child termination while the Go process is alive is unlikely.
 // processSysProcAttr preserves SIGTERM-on-parent-thread-exit behavior for long-running commands.
-func processSysProcAttr() *syscall.SysProcAttr {
+func processSysProcAttr() *unix.SysProcAttr {
 	attr := sysProcAttr()
-	attr.Pdeathsig = syscall.SIGTERM
+	attr.Pdeathsig = unix.SIGTERM
 	return attr
 }
 
-func sysProcAttr() *syscall.SysProcAttr {
-	return &syscall.SysProcAttr{
+func sysProcAttr() *unix.SysProcAttr {
+	return &unix.SysProcAttr{
 		Setpgid:   true,
-		Pdeathsig: syscall.SIGKILL,
+		Pdeathsig: unix.SIGKILL,
 	}
 }

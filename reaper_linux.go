@@ -11,8 +11,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // childPIDs merges every thread child list; Go may spawn children on any OS thread.
@@ -77,14 +78,14 @@ func (r *childReaper) scanChildren() error {
 			if !r.zombieChild(string(data), os.Getpid()) {
 				continue
 			}
-			var ws syscall.WaitStatus
+			var ws unix.WaitStatus
 			for {
-				_, err = syscall.Wait4(pid, &ws, syscall.WNOHANG, nil)
-				if !errors.Is(err, syscall.EINTR) {
+				_, err = unix.Wait4(pid, &ws, unix.WNOHANG, nil)
+				if !errors.Is(err, unix.EINTR) {
 					break
 				}
 			}
-			if errors.Is(err, syscall.ECHILD) {
+			if errors.Is(err, unix.ECHILD) {
 				continue
 			}
 			if err != nil {
@@ -126,7 +127,7 @@ func (r *childReaper) start() {
 			slog.Warn("failed to enable child subreaper", "err", err)
 		}
 		signals := make(chan os.Signal, 1)
-		signal.Notify(signals, syscall.SIGCHLD)
+		signal.Notify(signals, unix.SIGCHLD)
 		go r.serve(signals)
 	})
 }
