@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"syscall"
 )
 
 // mergeEnv merges system and custom environment variables; custom values take precedence.
@@ -17,7 +16,7 @@ func (s *script) mergeEnv() []string {
 	envMap := make(map[string]string)
 
 	// Load system environment variables as the baseline.
-	for _, env := range syscall.Environ() {
+	for _, env := range os.Environ() {
 		key := s.getEnvKey(env)
 		if key != "" {
 			envMap[key] = env

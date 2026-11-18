@@ -7,9 +7,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func waitForTestZombie(t *testing.T, r *childReaper, pid int) {
@@ -56,7 +57,7 @@ func TestReaperScanPreservesOwnedAndLiveChildren(t *testing.T) {
 	if err := r.scanChildren(); err != nil {
 		t.Fatal(err)
 	}
-	if err := live.Process.Signal(syscall.Signal(0)); err != nil {
+	if err := live.Process.Signal(unix.Signal(0)); err != nil {
 		t.Fatalf("scanner killed live child: %v", err)
 	}
 	err = owned.Wait()
@@ -83,7 +84,7 @@ func TestReaperScanCollectsOnlyUnownedZombie(t *testing.T) {
 	if _, err := os.Stat(fmt.Sprintf("/proc/%d", cmd.Process.Pid)); !os.IsNotExist(err) {
 		t.Fatalf("unowned zombie remains: %v", err)
 	}
-	if err := cmd.Wait(); !errors.Is(err, syscall.ECHILD) {
+	if err := cmd.Wait(); !errors.Is(err, unix.ECHILD) {
 		t.Fatalf("scanner did not consume unowned status: %v", err)
 	}
 }

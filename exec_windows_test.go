@@ -18,6 +18,18 @@ import (
 
 const windowsTreeHelperEnv = "XEXEC_WINDOWS_TREE_HELPER"
 
+// Run owned helpers without a console. A console-subsystem executable started
+// by a headless CI runner can otherwise acquire OS-managed console-host
+// processes, which are not part of the two-process fixture and may not grant
+// PROCESS_TERMINATE access. HideWindow only hides a window; it does not prevent
+// console allocation.
+func windowsTreeHelperCommand(mode string) *exec.Cmd {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestWindowsProcessTreeHelper$")
+	cmd.Env = append(os.Environ(), windowsTreeHelperEnv+"="+mode)
+	cmd.SysProcAttr = &windows.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
+	return cmd
+}
+
 // The helper uses only this test executable; no ping, PowerShell, or network is needed.
 func TestWindowsProcessTreeHelper(t *testing.T) {
 	switch os.Getenv(windowsTreeHelperEnv) {
@@ -25,9 +37,13 @@ func TestWindowsProcessTreeHelper(t *testing.T) {
 		for {
 			time.Sleep(time.Hour)
 		}
+	case "no-console":
+		cp, _ := windows.GetConsoleCP()
+		if cp != 0 {
+			t.Fatalf("helper unexpectedly attached to a console: code page=%d", cp)
+		}
 	case "root":
-		child := exec.Command(os.Args[0], "-test.run=^TestWindowsProcessTreeHelper$")
-		child.Env = append(os.Environ(), windowsTreeHelperEnv+"=leaf")
+		child := windowsTreeHelperCommand("leaf")
 		if err := child.Start(); err != nil {
 			os.Exit(2)
 		}
@@ -39,6 +55,13 @@ func TestWindowsProcessTreeHelper(t *testing.T) {
 		}
 		_ = child.Wait()
 		os.Exit(0)
+	}
+}
+
+func TestWindowsTreeHelperRunsWithoutConsole(t *testing.T) {
+	cmd := windowsTreeHelperCommand("no-console")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("console-free helper: %v\n%s", err, out)
 	}
 }
 
@@ -73,6 +96,7 @@ func windowsTestAwaitTree(t *testing.T, path string) []windows.Handle {
 				if pid <= 0 {
 					t.Fatalf("invalid helper PID: %d", pid)
 				}
+				t.Logf("owned helper PID: %d", pid)
 				handles = append(handles, windowsTestProcessHandle(t, pid))
 			}
 			return handles
@@ -116,8 +140,8 @@ func windowsTestWaiter(t *testing.T, wait func() error) func() error {
 
 func TestWindowsKillAllTerminatesOwnedTree(t *testing.T) {
 	ready := filepath.Join(t.TempDir(), "ready.json")
-	cmd := exec.Command(os.Args[0], "-test.run=^TestWindowsProcessTreeHelper$")
-	cmd.Env = append(os.Environ(), windowsTreeHelperEnv+"=root", "XEXEC_WINDOWS_TREE_READY="+ready)
+	cmd := windowsTreeHelperCommand("root")
+	cmd.Env = append(cmd.Env, "XEXEC_WINDOWS_TREE_READY="+ready)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}

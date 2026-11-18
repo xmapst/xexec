@@ -4,7 +4,6 @@ package xexec
 
 import (
 	"errors"
-	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -22,7 +21,7 @@ func KillAll(pid int32) error {
 }
 
 // killAll separates signal delivery from termination policy to make permission and other errors testable.
-func killAll(pid int, kill func(int, syscall.Signal) error) error {
+func killAll(pid int, kill func(int, unix.Signal) error) error {
 	groupErr := kill(-pid, unix.SIGKILL)
 	if groupErr == nil {
 		// The main process is in this group; do not signal its PID again, avoiding PID reuse after exit.

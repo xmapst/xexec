@@ -7,7 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
-	"syscall"
+
+	"golang.org/x/sys/windows"
 )
 
 // execSysScript selects PowerShell or cmd.exe by script extension on Windows.
@@ -88,8 +89,8 @@ func (s *script) beforeExec() {
 
 // Dependency injection keeps cancellation failure tests independent of host permissions.
 func (s *script) beforeExecWithKillAll(killAll func(int32) error) {
-	s.cmd.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP, // Create an isolated process group.
+	s.cmd.SysProcAttr = &windows.SysProcAttr{
+		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP, // Create an isolated process group.
 		HideWindow:    true,                             // Hide the console window.
 	}
 	s.cmd.Cancel = func() error {
